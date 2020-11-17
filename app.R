@@ -1,328 +1,706 @@
-library(shinydashboard)
-library(shiny)
-library(tidyverse)
+# Setup
+library(dplyr)
+library(readr)
 library(sf)
 library(tmap)
-library(readxl)
-library(geojsonsf)
+library(shiny)
+library(shinydashboard)
 library(osmdata)
+library(tidyr)
+library(RSQLite)
+library(dbplyr)
+library(ggplot2)
+library(plotly)
+library(stringr)
+library(forcats)
+library(magrittr)
+# setwd("C:/Users/brown/Desktop/car_purchases_by_lsoa/application")
 
-# All data
-dir <- "data/"
-file <- "DVLA_FOI_LSOA_v2"
-dvla <- read_csv(file = paste0(dir, file, ".csv"),
-                 guess_max = 100000)
+### Initial things ###
 
-# Key
-file <- "DVLA_FOI_KEY"
-key <- read_csv(file = paste0(dir, file, ".csv"))
+# Create database connection
+app_db_path <- "data"
+app_db_file <- "app_database.sqlite"
+app_database <- dbConnect(RSQLite::SQLite(), paste(app_db_path, app_db_file, sep = "/"))
 
-# LSOAs
-dir <- "data/"
-lsoa_bounds <- st_read(paste0(dir, "lsoas.shp"))
+# Load boundaries
+path <- "data/spatial/lsoas.shp"
+lsoa_shapes <- st_read(path) %>%
+  select(LSOA11CD = LSOA11C)
 
-# Create list of LAs
-la_list <- dvla %>%
-  distinct(lan2019) %>%
-  arrange(lan2019) %>%
-  pull()
+path <- "data/spatial/Local_Authority_Districts__December_2019__Boundaries_UK_BGC.shp"
+la_shapes <- st_read(path) %>%
+  rename(LAD19CD = lad19cd,
+         LAD19NM = lad19nm)
 
-# Get range of years
-years <- dvla %>%
-  distinct(year) %>%
-  pull()
+# Get list of LAs
+la_list_tib <- tbl(app_database, "la_list") %>%
+  select(RGN11NM, LAD19NM) %>%
+  as_tibble()
 
-nice_names <- dvla %>%
-  names() %>%
+# This turns in into a grouped list for the drop-down menu
+la_list <- split(la_list_tib$LAD19NM, la_list_tib$RGN11NM)
+
+# Get range of years covered in data
+year_range <- tbl(app_database, "time_series") %>%
+  summarise(min = min(year, na.rm = TRUE),
+            max = max(year, na.rm = TRUE)) %>%
+  as_tibble()
+
+# Get list of LSOA to exclude because of dealerships
+excluded_zones <- tbl(app_database, "all_lsoa_data") %>%
+  filter(dealer == 1 | total_business_land_use_pct > 50) %>%
   as_tibble() %>%
-  left_join(key, by = c("value" = "variable")) %>%
-  pull(label)
+  pull(LSOA11CD)
 
 # Create CAGR function
 cagr_f <- function(start, end, n_years) {
   round(((end / start) ^ (1/n_years) - 1), 4)*100
 }
 
-# Define UI for app that draws a map of a selected area, with LSOAs coloured by CAGR in car ownership per capita
+# Defaults
+default_year_range <- c(2016, 2020)
+
+### UI ###
 ui <- fluidPage(
-  titlePanel("Change in per capita car ownership by local authority"),
+  titlePanel("Change in car registrations by LA and small areas"),
+  br(),
   sidebarLayout(
-      sidebarPanel(
-          selectInput("la",
+    sidebarPanel(
+      selectInput("la",
                   label = h4("Choose local authority"),
                   choices = la_list,
-                  selected = 1),
-          sliderInput("range_of_years",
-                      label = h4("Select range"),
-                      min = min(years),
-                      max = max(years),
-                      value = c(2016, 2020),
-                      ticks = FALSE,
-                      sep = ""),
-          checkboxGroupInput("features",
-                             label = h4("Map features"),
-                             choiceNames = list("Universities",
-                                                "Car dealerships",
-                                                "Zones with low-traffic neighbourhood (LTN)",
-                                                "Place names"),
-                             choiceValues = list("universities", 
-                                                 "car_dealerships", 
-                                                 "ltn",
-                                                 "place_names")),
-          br(),
-          h4("Compound annual growth rate (CAGR)"),
-          "CAGR is the annual rate of change that would be required for per capita car ownership to move from its value at the start of the time period to the value at the end. The graph shows the actual change, aggregated across the local authority as a whole.",
-          h4("Sources"),
-          "Car ownership and LTN location data from ",
-          tags$a(href="https://twitter.com/Urban_Turbo/", "Scott Urban.", target="_blank"),
-          "You can download the data from ",
-          tags$a(href="https://drive.google.com/drive/folders/1XUJVz5UfdG7m0XDxp5EdSt2FeGik1H_G", "Google Drive.", target="_blank"),
-          "Map features from Open Street Map, accessed using ", 
-          tags$a(href="https://cran.r-project.org/web/packages/osmdata/vignettes/osmdata.html", "osmdata() package.", target="_blank"),
-          "Small area boundaries are 2011 census lower-layer super output areas (LSOAs), accessed from ", 
-          tags$a(href="https://geoportal.statistics.gov.uk/datasets/lower-layer-super-output-area-december-2011-ew-bsc-v2", "Open Geography Portal.", target="_blank"),
-          h4("Dashboard creation"),
-          "This app was created by ",
-          tags$a(href="https://twitter.com/chrisb_key/", "Chris C Brown", target="_blank"),
-          "using ",
-          tags$a(href="https://www.shinyapps.io/", "Shiny", target="_blank"),
-          "in R. Any development requests or feedback warmly recieved. You can find the source code on ",
-          tags$a(href="https://github.com/ccb2n19/", "GitHub.", target="_blank")
-          ),
-      mainPanel(
-        fluidRow(
-          valueBoxOutput("overall_cagr")
-          ,valueBoxOutput("change_in_cars")
-          ,valueBoxOutput("value3")
-        ),
-        tmapOutput("map"),
-        br(),
-        dataTableOutput("datatable"),
-        h3("Local authority-wide trend"),
-        plotOutput("time_series")
-               )
-    )
-  )
+                  selected = 1,
+                  selectize = TRUE),
+      sliderInput("range_of_years",
+                  label = h4("Select range"),
+                  min = year_range$min,
+                  max = year_range$max,
+                  value = default_year_range,
+                  ticks = FALSE,
+                  sep = ""),
+      br(),
+      h4("Sources"),
+      p("Car ownership and low-traffic neighbourhood (LTN) location data from ",
+      tags$a(href="https://twitter.com/Urban_Turbo/", "Scott Urban,", target="_blank"), "via a DVLA freedom of information request.",
+      "You can download the data from ",
+      tags$a(href="https://drive.google.com/drive/folders/1XUJVz5UfdG7m0XDxp5EdSt2FeGik1H_G", "Google Drive.", target="_blank")),
+  
+      p("Spatial analysis and mapping conducted using ", 
+      tags$a(href="https://cran.r-project.org/web/packages/osmdata/vignettes/osmdata.html", "osmdata()", target="_blank"),
+      "and ", tags$a(href="https://cran.r-project.org/web/packages/tmap/vignettes/tmap-getstarted.html", "tmap()", target="_blank"), "packages. ",
+      "Basemaps from ", tags$a(href="https://stadiamaps.com/", "Stadia Maps,", target="_blank"),
+      tags$a(href="https://openmaptiles.org/", "OpenMapTiles,"), "and ", tags$a(href="http://openstreetmap.org", "OpenStreetMap"), "contributors."
+      ),
 
+      p("Small area boundaries are 2011 census lower-layer super output areas (LSOAs). These, alongside LA boundaries and zone classifications, were accessed from the Ordnance Survey ", 
+      tags$a(href="https://geoportal.statistics.gov.uk/datasets/lower-layer-super-output-area-december-2011-ew-bsc-v2", "Open Geography Portal.", target="_blank")
+      ),
+      
+      h4("Dashboard creation"),
+      "This app was created by ",
+      tags$a(href="https://twitter.com/chrisb_key/", "Chris C Brown", target="_blank"),
+      "using ",
+      tags$a(href="https://www.shinyapps.io/", "Shiny", target="_blank"),
+      "in R. Any development requests or feedback warmly recieved. You can find the source code on ",
+      tags$a(href="https://github.com/ccb2n19/", "GitHub.", target="_blank"),
+      width = 3
+    ),
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Headline trends",
+                   valueBoxOutput("cpc_growth_box"),
+                   valueBoxOutput("cagr_box"),
+                   valueBoxOutput("change_in_cars_box"),
+                   br(),
+                   br(),
+                   br(),
+                   fluidRow(
+                   column(6,
+                          h4("Cars per capita time series"),
+                          plotlyOutput("national_and_local_time_series_plot")),
+                   column(6,
+                          h4("Index of absolute number of registered cars"),
+                          plotlyOutput("number_of_cars_index_plot")))),
+        tabPanel("National comparison",
+                   tmapOutput("local_authority_plot",
+                              height = 550),
+                 br(),
+                 column(6,
+                        h4("Biggest reducers"),
+                        tableOutput("biggest_reducers")),
+                 column(6,
+                        h4("Biggest growers"),
+                        tableOutput("biggest_growers"))
+                 ),
+        tabPanel("Small area comparisons",
+                 tmapOutput("lsoa_map",
+                            height = 550),
+                 br(),
+                 fluidRow(
+                 column(6,
+                        checkboxGroupInput("features",
+                                    inline = FALSE,
+                                    label = "Options",
+                                    choiceNames = list("Exclude high non-residential land use zones",
+                                                       "Highlight low-traffic neighbourhoods zones",
+                                                       "Show neighbouring local authorities"),
+                                    choiceValues = list("remove_non_res_zones",
+                                                        "show_ltns",
+                                                        "show_neighbours"))),
+                 column(6,
+                        radioButtons("stat_select_small_area", 
+                                     label = "Edit statistics",
+                                     c("Change in cars per capita" = "cpc_change_select",
+                                       "Cars per capita at start of range" = "cpc_start_select",
+                                       "Cars per capita at end of range" = "cpc_end_select")))),
+                 br(),
+                 column(6,
+                        h4("Biggest reducers"),
+                        tableOutput("small_area_biggest_reducers")),
+                 column(6, 
+                        h4("Biggest growers"),
+                        tableOutput("small_area_biggest_growers"))),
+        tabPanel("Socio-demographic breakdown",
+                 br(),
+                 helpText("This chart presents the overall change in",
+                          "cars per capita (CPC) in each zone of your chosen local authority, ",
+                          "alongside zones in the wider local government region. ",
+                          "The plots are subdivided according to the 2011 census area ",
+                          "classification of each lower-level super output area (LSOA). ", 
+                          "The graphic highlights different levels of variance ",
+                          "and average levels of change in CPC, once socio-demographic ",
+                          "factors are taken into account.",
+                          style="background-color:#f2f5fa"),
+                 fluidRow(
+                 plotlyOutput("lsoas_in_region_scatter",
+                              height = 1000)),
+                 br(),
+                 br()
+                 )
+    )
+    , width = 9)))
+           
+
+### SERVER ###
 server <- function(input, output) {
-  start_date <- reactive({input$range_of_years[1]})
+  # Set inputs as reactive values
   
-  end_date <- reactive({input$range_of_years[2]})
+  ## Years
+  start_year <- reactive({input$range_of_years[1]})
+  end_year <- reactive({input$range_of_years[2]})
+  averaging_period <- reactive({end_year() - start_year()})
   
-  averaging_period <- reactive({end_date() - start_date()})
-  
+  ## LA
   la <- reactive({input$la})
+  
+  ## Map features
   
   features <- reactive({input$features})
   
-  data <- reactive({dvla %>%
-      filter(lan2019 == la()) %>%
-      mutate(cars_per_capita = cars / pop18plus,
-             lag_cars_per_capita = lag(cars_per_capita, averaging_period()),
-             cagr = cagr_f(end = cars_per_capita, start = lag_cars_per_capita, averaging_period())) %>%
-      filter(year == end_date()) %>%
-      arrange(desc(cagr)) %>%
-      mutate_if(is.numeric, round, 2) %>%
-      left_join(lsoa_bounds, by = c("lsoan" = "LSOA11NMW")) %>%
-      st_as_sf() %>%
-      select(year, 
-             lsoan, 
-             lsoac, 
-             cars_per_capita, 
-             lag_cars_per_capita, 
-             cagr, 
+  ## Shape of selected LA
+  
+  la_shape <- reactive({la_shapes %>%
+    filter(LAD19NM == la())})
+  
+  # Growth by local authority during range of years
+  
+  growth_by_la <- reactive({
+    start_year_db <- start_year()
+    end_year_db <- end_year()
+    
+    non_spatial <- tbl(app_database, "time_series") %>%
+      filter(year == start_year_db | year == end_year_db) %>%
+      as_tibble() %>%
+      group_by(LAD19NM, year) %>%
+      summarise(total_pop = sum(pop18plus),
+                total_cars = sum(cars)) %>%
+      mutate(cpc = total_cars / total_pop,
+             start_or_end = case_when(year == start_year() ~ "start_year",
+                                      year == end_year()   ~ "end_year")) %>%
+      select(-year) %>%
+      mutate(cpc_start_of_period = dplyr::lag(cpc, 1),
+             cars_start_of_period = dplyr::lag(total_cars, 1),
+             cagr                     = cagr_f(start   = cpc_start_of_period,
+                                               end     = cpc,
+                                               n_years = averaging_period()),
+             total_growth_in_cpc = round(((cpc - cpc_start_of_period) / cpc_start_of_period) * 100, 2),
+             change_in_cars      = total_cars - cars_start_of_period,
+             people_per_car      = total_pop / total_cars) %>%
+      filter(start_or_end == "end_year") %>%
+      ungroup() %>%
+      mutate(cpc_growth_rank = row_number(total_growth_in_cpc))
+    
+    la_shapes %>%
+      select(LAD19NM) %>%
+      inner_join(non_spatial, by = "LAD19NM")
+  })
+  
+  # Growth by LSOA during range of years
+  growth_by_lsoa <- reactive({
+    # Set values
+    start_year_db <- start_year()
+    end_year_db <- end_year()
+    
+    # Get shape of relevant LA
+    la_shape <- la_shapes %>%
+      filter(LAD19NM == la())
+    
+    la_selection = case_when("show_neighbours" %in% features() ~ la_shapes %>%
+                                                               st_filter(la_shape, f = st_intersects) %>%
+                                                               st_drop_geometry() %>%
+                                                               pull(LAD19NM),
+                                                       TRUE ~ la())
+    
+    non_spatial <- tbl(app_database, "time_series") %>%
+      filter(year == start_year_db | year == end_year_db,
+             LAD19NM %in% la_selection) %>%
+      as_tibble() %>%
+      mutate(cpc = cars / pop18plus,
+             start_or_end = case_when(year == start_year() ~ "start_year",
+                                      year == end_year()   ~ "end_year")) %>%
+      group_by(LSOA11CD) %>%
+      mutate(cpc_start_of_period  = dplyr::lag(cpc, 1),
+             cars_start_of_period = dplyr::lag(cars, 1),
+             cagr                 = cagr_f(start   = cpc_start_of_period,
+                                           end     = cpc,
+                                           n_years = averaging_period()),
+             total_growth_in_cpc  = round(((cpc - cpc_start_of_period) / cpc_start_of_period) * 100, 2),
+             change_in_cars       = cars - cars_start_of_period,
+             people_per_car       = pop18plus / cars) %>%
+      ungroup() %>%
+      filter(start_or_end == "end_year") %>%
+      group_by(LAD19NM) %>%
+      mutate(cpc_growth_rank = row_number(total_growth_in_cpc)) %>%
+      select(LSOA11CD, 
+             LAD19NM, 
+             cars,
+             cars_start_of_period, 
+             cpc, 
+             cpc_start_of_period,
+             total_growth_in_cpc,
+             cagr,
+             cpc_growth_rank)
+    
+    additional_data <- tbl(app_database, "all_lsoa_data") %>%
+      filter(LAD19NM %in% la_selection) %>%
+      select(LSOA11CD,
              ltn, 
              ltna, 
+             ltnpc, 
+             ltn_note, 
              ltn_time, 
-             pop18plus,
-             ltnpc,
-             ltn_note) %>%
-      st_transform(27700) %>%
-      st_make_valid()
-      })
-  
-  data_for_graph <- reactive({dvla %>%
-      filter(lan2019 == la(),
-             year >= start_date(),
-             year <= end_date()) %>%
-      group_by(year) %>%
-      summarise(total_population = sum(pop18plus),
-                total_cars = sum(cars),
-                cars_per_capita = total_cars / total_population)
-  })
-  
-  la_cagr <- reactive({data_for_graph() %>%
-    mutate(lag_cars_per_capita_la = lag(cars_per_capita, averaging_period()),
-           la_cagr = cagr_f(start = lag_cars_per_capita_la, 
-                            end = cars_per_capita, 
-                            n_years = averaging_period())) %>%
-    filter(year == end_date()) %>%
-    pull(la_cagr)})
-  
-  raw_cars <- reactive({data_for_graph() %>%
-      mutate(lag_total_cars = lag(total_cars, averaging_period()),
-             change_in_cars = total_cars - lag_total_cars) %>%
-      filter(year == end_date())
-      })
-  
-  ltns <- reactive({
-    data() %>%
-      filter(!is.na(ltn)) %>%
-      select(lsoan, ltn, ltna, ltnpc, ltn_note)
-  })
-  
-  data_to_present <- reactive({data() %>%
-                                st_drop_geometry() %>%
-                                select(year, lsoan, lsoac, cagr, pop18plus, lag_cars_per_capita, cars_per_capita, ltn, ltn_time) %>%
-                                    rename("Year"                              = year,
-                                           "LSOA name"                         = lsoan,
-                                           "Cars per capita (start of period)" = lag_cars_per_capita,
-                                           "Cars per capita (end of period)"   = cars_per_capita,
-                                           "18-plus population"                = pop18plus,
-                                           "LSOA code"                         = lsoac,
-                                           "CAGR (%)"                          = cagr,
-                                           "Zone contains LTN"                 = ltn,
-                                           "Years as LTN"                      = ltn_time
-                                           )})
-
-  osm_cd <- reactive({data() %>%
-      st_transform(4326) %>%
-      st_bbox() %>%
-      opq() %>%
-      add_osm_feature(key = "shop",
-                      value = "car") %>%
-      osmdata_sf()
-    })
+             SOAC11NM,
+             MSOA11HCLNM) %>%
+      as_tibble()
     
-  osm_uni <- reactive({data() %>%
-      st_transform(4326) %>%
-      st_bbox() %>%
-      opq() %>%
-      add_osm_feature(key = "amenity",
-                      value = "university") %>%
-      osmdata_sf()
-    })
-  
-  osm_places <- reactive({data() %>%
-      st_transform(4326) %>%
-      st_bbox() %>%
-      opq() %>%
-      add_osm_feature(key = "place",
-                      value = c("city", "town", "village")) %>%
-      osmdata_sf()
+    lsoa_shapes %>%
+      inner_join(non_spatial, by = "LSOA11CD") %>%
+      left_join(additional_data, by = "LSOA11CD")
   })
   
-  points_cd <- reactive({osm_cd()$osm_points %>%
-      st_transform(27700) %>%
-      st_intersection(data())
-    })
+  # Growth in CPC for all LSOAs within region
   
-  polys_unis <- reactive({osm_uni()$osm_polygons %>%
-      st_transform(27700) %>%
-      st_intersection(data())
-    })
+  all_lsoas_in_region <- reactive({
+    # Set values
+    start_year_db <- start_year()
+    end_year_db <- end_year()
+    
+    # Get region from LA
+    region <- la_list_tib %>%
+      filter(LAD19NM == la()) %>%
+      pull(RGN11NM)
+    
+    all_lsoa_data <- tbl(app_database, "all_lsoa_data") %>%
+      select(LSOA11CD, LAD19NM, RGN11NM, ltn, MSOA11HCLNM, SOAC11NM) %>%
+      filter(!LSOA11CD %in% excluded_zones,
+             RGN11NM == region) %>%
+      as_tibble()
+    
+    lsoa_list <- all_lsoa_data$LSOA11CD
+      
+    time_series <- tbl(app_database, "time_series") %>%
+                    select(LSOA11CD, year, cars, pop18plus) %>%
+                    filter(LSOA11CD %in% lsoa_list,
+                         year == start_year_db | year == end_year_db) %>%
+                    as_tibble() %>%
+                    group_by(LSOA11CD) %>%
+                    mutate(cpc = cars / pop18plus,
+                           total_growth_in_cpc = ((cpc - lag(cpc, 1)) / lag(cpc, 1)) * 100,
+                           total_growth_in_cpc = round(total_growth_in_cpc, 2)) %>%
+      ungroup() %>%
+      filter(year == end_year_db) %>%
+      select(-year)
+    
+    all_lsoa_data %>%
+      left_join(time_series, by = "LSOA11CD") %>%
+      slice(sample(1:n())) %>%
+      mutate(rand = row_number(),
+             facet_SOAC = str_wrap(SOAC11NM, 20),
+             from_selected_la = case_when(LAD19NM == la() ~ paste0("Zone in ", la()),
+                                          TRUE ~ paste0("Zone elsewhere in ", RGN11NM)),
+             from_selected_la = fct_relevel(from_selected_la, la())) %>%
+      arrange(rand)
+  })
   
-  points_places <- reactive({osm_places()$osm_points %>%
-      st_transform(27700) %>%
-      st_intersection(data())
+  # Values by local authority across all years
+  
+  time_series_by_la <- reactive({
+    start_year_db <- start_year()
+    end_year_db <- end_year()
+    
+    tbl(app_database, "time_series") %>%
+      filter(year >= start_year_db &  year <= end_year_db) %>%
+      as_tibble() %>%
+      group_by(LAD19NM, year) %>%
+      summarise(total_pop = sum(pop18plus),
+                total_cars = sum(cars)) %>%
+      mutate(cpc = total_cars / total_pop)
+  })
+  
+  # National vs. local time series data
+  
+  national_and_local_time_series <- reactive({
+    national <- time_series_by_la() %>%
+      group_by(year) %>%
+      summarise(total_pop = sum(total_pop),
+                total_cars = sum(total_cars)) %>%
+      ungroup() %>%
+      mutate(cpc = total_cars / total_pop,
+             type = "Nationwide")
+    
+    selected_la <- time_series_by_la() %>%
+      filter(LAD19NM == la()) %>%
+      mutate(type = la())
+    
+    bind_rows(national, selected_la) %>%
+      mutate(type = fct_relevel(type, "Nationwide", after = 1))
+  })
+  
+  # Index graph data
+  
+  national_and_local_cars_index <- reactive({
+    
+    local_base <- time_series_by_la() %>%
+      filter(LAD19NM == la(),
+             year == start_year()) %>%
+      select(LAD19NM, base_cars = total_cars)
+    
+    local_index <- time_series_by_la() %>%
+      filter(LAD19NM == la()) %>%
+      left_join(local_base, by = "LAD19NM") %>%
+      mutate(index = (total_cars / base_cars) * 100,
+             type = la()) %>%
+      select(year, type, index)
+    
+    national_totals <- time_series_by_la() %>%
+      group_by(year) %>%
+      summarise(total_cars = sum(total_cars)) %>%
+      ungroup()
+    
+    national_base <- national_totals %>%
+      filter(year == start_year()) %>%
+      pull(total_cars)
+    
+    national_index <- national_totals %>%
+      mutate(index = (total_cars / national_base) * 100,
+             type = "Nationwide") %>%
+      select(year, type, index)
+    
+    bind_rows(local_index, national_index) %>%
+      mutate(type = fct_relevel(type, "Nationwide", after = 1))
+  })
+  
+  
+  # Turn reactive objects into outputs
+  ## HEADLINES ##
+  output$cpc_growth_box <- renderValueBox({
+    number <- growth_by_la() %>% 
+      filter(LAD19NM == la()) %>% 
+      pull(total_growth_in_cpc)
+    
+    valueBox(
+      value = paste0(number %>% 
+                       prettyNum(big.mark = ","), "%"),
+      subtitle = "Total change in cars per person"
+    )
+  })
+  
+  output$cagr_box <- renderValueBox({
+    number <- growth_by_la() %>% 
+      filter(LAD19NM == la()) %>% 
+      pull(cagr)
+    
+    valueBox(
+      value = paste0(number %>%
+                       prettyNum(big.mark = ","), "%"),
+      subtitle = "Average annual change in cars per person "
+    )
+  })
+  
+  output$change_in_cars_box <- renderValueBox({
+    number <- growth_by_la() %>% 
+      filter(LAD19NM == la()) %>% 
+      pull(change_in_cars)
+
+    valueBox(
+      value = number %>% 
+                prettyNum(big.mark = ","),
+      subtitle = if_else(growth_by_la() %>% 
+                           filter(LAD19NM == la()) %>% 
+                           pull(change_in_cars) < 0,
+                         "fewer cars registered in the LA",
+                         "more cars registered in in the LA")
+    )
+  })
+  
+  ## TREND GRAPHS ##
+  
+  output$national_and_local_time_series_plot <- renderPlotly({
+    ggplotly(
+      ggplot(data = national_and_local_time_series(), aes(x = year, y = cpc)) +
+        geom_line(aes(linetype = type)) +
+        scale_y_continuous(limits = c(0, NA),
+                           labels = scales::number_format(accuracy = 0.1),
+                           name = "Cars per capita") +
+        scale_x_continuous(labels = scales::number_format(accuracy = 1,
+                                                          big.mark = ""),
+                           name = "") +
+        theme_minimal()
+    ) %>% layout(legend = list(orientation = "h", x = 0, y = -0.08))
   })
 
-  output$datatable <- renderDataTable({data_to_present()},
-                                      options = list(pageLength = 10))
-  
-  output$map <- renderTmap({tm_shape(data(),
-                                     name = "LSOAs") +
-                              tm_polygons(col = "cagr",
-                                          palette = "Spectral",
-                                          alpha = 0.5,
-                                          title = "CAGR (%)",
-                                          popup.vars = c("Year"                              = "year",
-                                                         "LSOA name"                         = "lsoan",
-                                                         "Cars per capita (start of period)" = "lag_cars_per_capita",
-                                                         "Cars per capita (end of period)"   = "cars_per_capita",
-                                                         "18-plus population"                = "pop18plus",
-                                                         "LSOA code"                         = "lsoac",
-                                                         "CAGR (%)"                          = "cagr"
-                                          )) +
-                            {if(nrow(points_cd()) >= 1 & "car_dealerships" %in% features())
-                              tm_shape(points_cd(),
-                                       name = "Car dealerships") +
-                              tm_dots(popup.vars = c("Dealership name" = "name") +
-                              tm_add_legend(type = "fill",
-                                            col = "black",
-                                            lwd = 2,
-                                            labels = "Car dealerships"))} +
-                            {if(nrow(polys_unis()) >= 1 & "universities" %in% features())
-                              tm_shape(polys_unis(),
-                                       name = "Universities") +
-                              tm_polygons(col = "white",
-                                          alpha = 0.5,
-                                          lwd = 2,
-                                          border.col = "blue",
-                                          popup.vars = c("University name" = "name")) +
-                               tm_add_legend(type = "fill",
-                                             col = "blue",
-                                             lwd = 2,
-                                             labels = "Universities")} +
-                            {if(nrow(ltns()) >= 1 & "ltn" %in% features())
-                              tm_shape(ltns(),
-                                       name = "LTNs") +
-                              tm_polygons(border.col = "green",
-                                          lwd = 4,
-                                          alpha = 0,
-                                          popup.vars=c("LTN name" = "ltn",
-                                                       "LTN subsection" = "ltna",
-                                                       "Percent of LSOA in LTN" = "ltnpc",
-                                                       "Note" = "ltn_note")) +
-                                tm_add_legend(type = "fill",
-                                              col = "green",
-                                              lwd = 2,
-                                              labels = "LTNs")} +
-      {if(nrow(points_places()) >= 1 & "place_names" %in% features())
-                              tm_shape(points_places()) +
-                                tm_text(text = "name",
-                                        auto.placement = TRUE)}
-                          })
-  
-  output$time_series_table <- renderDataTable({data_for_graph()})
-  
-  output$time_series <- renderPlot({
-    ggplot(data = data_for_graph(), aes(x = year, y = cars_per_capita)) +
-      geom_line(col = "grey",
-                lwd = 2) +
-      ylim(0, NA) +
-      labs(x = "Year",
-           y = "Cars per capita")
+  output$number_of_cars_index_plot <- renderPlotly({
+    ggplotly(
+      ggplot(data = national_and_local_cars_index(), aes(x = year, y = index)) +
+        geom_line(aes(linetype = type)) +
+        scale_y_continuous(labels = scales::number_format(accuracy = 0.1),
+                           name = paste0("Index (", start_year(), "= 100)")) +
+        scale_x_continuous(labels = scales::number_format(accuracy = 1,
+                                                          big.mark = ""),
+                           name = "") +
+        theme_minimal()
+  ) %>% layout(legend = list(orientation = "h", x = 0, y = -0.08))
   })
   
-  output$la <- renderText(la())
+  ## LA VIEW OUTPUTS ##
   
-  output$features <- renderText(features())
-  
-  output$start_date <- renderText(start_date())
-  
-  output$end_date <- renderText(end_date())
-  
-  output$averaging_period <- renderText(averaging_period())
-  
-  output$overall_cagr <- renderValueBox({
-    valueBox(
-      value = paste0(la_cagr(), "%"),
-      subtitle = paste0("LA-wide CAGR"),
-      icon = icon("stats",lib='glyphicon'),
-      color = "purple")
+  output$local_authority_plot <- renderTmap({
+    breaks <- seq(-50, 50, by = 10)
+    
+    selected_la <- growth_by_la() %>%
+      filter(LAD19NM == la())
+    
+    tm_basemap(server = "https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}{r}.png") +
+    tm_shape(growth_by_la(), 
+             bbox = selected_la,
+             name = "All LAs") +
+      tm_polygons(col     = "total_growth_in_cpc",
+                  palette = "-RdYlGn",
+                  midpoint = 0,
+                  alpha   = 0.7,
+                  lwd     = 0.5,
+                  style = "jenks",
+                  n = 10,
+                  title = "Total growth in cars per capita",
+                  popup.vars = c("LA name" = "LAD19NM",
+                                 "Change in CPC over period (%)" = "total_growth_in_cpc",
+                                 "Average annual change in CPC (%)" = "cagr",
+                                 "Number of cars (start)" = "cars_start_of_period",
+                                 "Number of cars (end)" = "total_cars",
+                                 "CPC (start)" = "cpc_start_of_period",
+                                 "CPC (end)" = "cpc")) +
+    tm_shape(selected_la,
+             name = "Selected LA") +
+      tm_borders(lwd = 3,
+                 col = "black")
   })
   
-  output$change_in_cars <- renderValueBox({
-    valueBox(
-      value = paste0(raw_cars() %>% pull(change_in_cars)),
-      subtitle = paste0("change in the total number of cars. From ", raw_cars() %>% pull(lag_total_cars), " to ", raw_cars() %>% pull(total_cars)),
-      icon = icon("stats",lib='glyphicon'),
-      color = "purple")
+  output$biggest_reducers <- renderTable({
+    growth_by_la() %>%
+      st_drop_geometry() %>%
+      arrange(cpc_growth_rank) %>%
+      select("Car reduction rank" = cpc_growth_rank,
+             "LA name" = LAD19NM,
+             "Cars per capita at start" = cpc_start_of_period,
+             "Cars per capita at end" = cpc,
+             "Overall change" = total_growth_in_cpc) %>%
+      head(10)
+   })
+  
+  output$biggest_growers <- renderTable({
+    growth_by_la() %>%
+      st_drop_geometry() %>%
+      arrange(desc(cpc_growth_rank)) %>%
+      select("Car reduction rank" = cpc_growth_rank,
+             "LA name" = LAD19NM,
+             "Cars per capita at start" = cpc_start_of_period,
+             "Cars per capita at end" = cpc,
+             "Overall change" = total_growth_in_cpc) %>%
+      head(10)
   })
+  
+  lsoas_for_plot <- reactive({
+    growth_by_lsoa() %>%
+     filter(if ("remove_non_res_zones" %in% features()) 
+            {!LSOA11CD %in% excluded_zones}
+            else {is.character(LSOA11CD)}
+            ) %>%
+      mutate(cpc_growth_rank = row_number(total_growth_in_cpc)) %>%
+      arrange(cpc_growth_rank)
+    })
+  
+  stat_select <- reactive({input$stat_select_small_area})
+  
+  output$stat_select <- renderText(stat_select())
+  
+  output$lsoa_map <- renderTmap({
+    la_outline <- growth_by_lsoa() %>%
+      filter(LAD19NM == la()) %>%
+      summarise(LAD19NM = la())
+
+      tm_basemap(server = "https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}{r}.png") +
+                  tm_shape(lsoas_for_plot(),
+                           bbox = la_outline, 
+                           name = "LSOAs") +
+                  {if(stat_select() == "cpc_change_select")
+                    tm_polygons(col     = "total_growth_in_cpc",
+                                palette = "-RdYlGn",
+                                midpoint = 0,
+                                alpha   = 0.7,
+                                lwd     = 0.5,
+                                style = "jenks",
+                                n = 10,
+                                title = "Total growth in cars per capita",
+                                popup.vars = c("LSOA code" = "LSOA11CD",
+                                               "Locality" = "MSOA11HCLNM",
+                                               "Census categorisation" = "SOAC11NM",
+                                               "Change in CPC over period (%)" = "total_growth_in_cpc",
+                                               "Average annual change in CPC (%)" = "cagr",
+                                               "Number of cars (start)" = "cars_start_of_period",
+                                               "Number of cars (end)" = "cars",
+                                               "CPC (start)" = "cpc_start_of_period",
+                                               "CPC (end)" = "cpc"))} +
+                {if(stat_select() == "cpc_start_select")
+                    tm_polygons(col         = "cpc_start_of_period",
+                                 palette    = "viridis",
+                                 style      = "jenks",
+                                 n          = 10,
+                                 alpha      = 0.7,
+                                 title      = paste0("Cars per capita in ", start_year()),
+                                 popup.vars = c("LSOA code" = "LSOA11CD",
+                                                "Locality" = "MSOA11HCLNM",
+                                                "Census categorisation" = "SOAC11NM",
+                                                "Change in CPC over period (%)" = "total_growth_in_cpc",
+                                                "Average annual change in CPC (%)" = "cagr",
+                                                "Number of cars (start)" = "cars_start_of_period",
+                                                "Number of cars (end)" = "cars",
+                                                "CPC (start)" = "cpc_start_of_period",
+                                                "CPC (end)" = "cpc"))} +
+                 {if(stat_select() == "cpc_end_select")
+                   tm_polygons(col         = "cpc",
+                               palette    = "viridis",
+                               style      = "jenks",
+                               n          = 10,
+                               alpha      = 0.7,
+                               title      = paste0("Cars per capita in ", end_year()),
+                               popup.vars = c("LSOA code" = "LSOA11CD",
+                                              "Locality" = "MSOA11HCLNM",
+                                              "Census categorisation" = "SOAC11NM",
+                                              "Change in CPC over period (%)" = "total_growth_in_cpc",
+                                              "Average annual change in CPC (%)" = "cagr",
+                                              "Number of cars (start)" = "cars_start_of_period",
+                                              "Number of cars (end)" = "cars",
+                                              "CPC (start)" = "cpc_start_of_period",
+                                              "CPC (end)" = "cpc"))} +
+                {if("show_ltns" %in% features() & nrow(lsoas_for_plot() %>% filter(!is.na(ltn))) > 0)
+                  tm_shape(lsoas_for_plot() %>% filter(!is.na(ltn)),
+                           name = "Low-traffic neighbourhoods") +
+                    tm_polygons(lwd = 2.5,
+                                alpha = 0,
+                                border.col = "Yellow",
+                                popup.vars = c("LTN detail" = "ltn_note",
+                                               "LSOA code" = "LSOA11CD",
+                                               "Locality" = "MSOA11HCLNM",
+                                               "Census categorisation" = "SOAC11NM",
+                                               "Change in CPC over period (%)" = "total_growth_in_cpc",
+                                               "Average annual change in CPC (%)" = "cagr",
+                                               "Number of cars (start)" = "cars_start_of_period",
+                                               "Number of cars (end)" = "cars",
+                                               "CPC (start)" = "cpc_start_of_period",
+                                               "CPC (end)" = "cpc"))} +
+                  tm_shape(la_outline) +
+                    tm_borders(lwd = 3,
+                               col = "black")
+    })
+  
+  
+  
+  output$small_area_biggest_reducers <- renderTable({
+    lsoas_for_plot() %>%
+      head(5) %>%
+      st_drop_geometry() %>%
+      mutate(cars_start_of_period = as.integer(cars_start_of_period),
+             cars = as.integer(cars)) %>%
+      select("Rank" = cpc_growth_rank,
+             "LSOA code" = LSOA11CD,
+             "Locality" = MSOA11HCLNM,
+             "CPC growth (%)" = total_growth_in_cpc,
+             "Cars at start" = cars_start_of_period,
+             "Cars at end" = cars
+             )
+  })
+  
+  output$small_area_biggest_growers <- renderTable({
+    lsoas_for_plot() %>%
+      tail(5) %>%
+      st_drop_geometry() %>%
+      mutate(cars_start_of_period = as.integer(cars_start_of_period),
+             cars = as.integer(cars)) %>%
+      arrange(desc(cpc_growth_rank)) %>%
+      select("Rank" = cpc_growth_rank,
+             "LSOA code" = LSOA11CD,
+             "Locality" = MSOA11HCLNM,
+             "CPC growth (%)" = total_growth_in_cpc,
+             "Cars at start" = cars_start_of_period,
+             "Cars at end" = cars
+      )
+  })
+  
+  output$lsoas_in_region_scatter <- renderPlotly({
+    ggp <- ggplot(data = all_lsoas_in_region(), aes(x      = rand, 
+                                                    y      = total_growth_in_cpc, 
+                                                    label  = LSOA11CD,
+                                                    label2 = MSOA11HCLNM)) +
+      geom_point(aes(col = from_selected_la),
+                 alpha = 0.5) +
+      geom_hline(yintercept = 0,
+                  lty = "dashed") +
+      facet_wrap(~facet_SOAC,
+                 ncol = 5) +
+      scale_x_continuous(name = "",
+                         labels = NULL) +
+      scale_y_continuous(name = "Total change in cars per person within zone (%)",
+                         breaks = seq(-500, 500, by = 20)) +
+      theme_minimal() +
+      theme(strip.text = element_text(size = 8))
+    
+    ggplty <- ggplotly(ggp,
+                       tooltip = c("label",
+                                   "y",
+                                   "label2"))
+    
+    
+    
+    ggplty %>% layout(legend = list(orientation = "h", x = 0, y = 1.085),
+                      margin = list(l = 85))
+      
+  })
+  
+  output$lsoas_in_region <- renderTable({all_lsoas_in_region()})
 
 }
 
 shinyApp(ui = ui, server = server)
 
-# deployApp("C:/Users/brown/Desktop/car_purchases_by_lsoa/application")
+### rsconnect::deployApp("C:/Users/brown/Desktop/car_purchases_by_lsoa/application")
