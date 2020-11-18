@@ -28,6 +28,10 @@ path <- "data/spatial/lsoas.shp"
 lsoa_shapes <- st_read(path) %>%
   select(LSOA11CD = LSOA11C)
 
+opts <- tmap_options(basemaps = c(Canvas = "Esri.WorldGrayCanvas", Imagery = "Esri.WorldImagery"),
+                     overlays = c(Labels = paste0("http://services.arcgisonline.com/arcgis/rest/services/Canvas/",
+                                                  "World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}")))
+
 path <- "data/spatial/Local_Authority_Districts__December_2019__Boundaries_UK_BGC.shp"
 la_shapes <- st_read(path) %>%
   rename(LAD19CD = lad19cd,
@@ -63,10 +67,14 @@ default_year_range <- c(2016, 2020)
 
 ### UI ###
 ui <- fluidPage(
-  titlePanel("Change in car registrations by LA and small areas"),
+  title = "Data dashboard of car registrations in England",
+  
   br(),
+  h4("Data dashboard of car registrations in England"),
+  br(),
+  
   sidebarLayout(
-    sidebarPanel(
+    sidebarPanel(width = 3,
       selectInput("la",
                   label = h4("Choose local authority"),
                   choices = la_list,
@@ -79,36 +87,12 @@ ui <- fluidPage(
                   value = default_year_range,
                   ticks = FALSE,
                   sep = ""),
-      br(),
-      h4("Sources"),
-      p("Car ownership and low-traffic neighbourhood (LTN) location data from ",
-      tags$a(href="https://twitter.com/Urban_Turbo/", "Scott Urban,", target="_blank"), "via a DVLA freedom of information request.",
-      "You can download the data from ",
-      tags$a(href="https://drive.google.com/drive/folders/1XUJVz5UfdG7m0XDxp5EdSt2FeGik1H_G", "Google Drive.", target="_blank")),
-  
-      p("Spatial analysis and mapping conducted using ", 
-      tags$a(href="https://cran.r-project.org/web/packages/osmdata/vignettes/osmdata.html", "osmdata()", target="_blank"),
-      "and ", tags$a(href="https://cran.r-project.org/web/packages/tmap/vignettes/tmap-getstarted.html", "tmap()", target="_blank"), "packages. ",
-      "Basemaps from ", tags$a(href="https://stadiamaps.com/", "Stadia Maps,", target="_blank"),
-      tags$a(href="https://openmaptiles.org/", "OpenMapTiles,"), "and ", tags$a(href="http://openstreetmap.org", "OpenStreetMap"), "contributors."
       ),
-
-      p("Small area boundaries are 2011 census lower-layer super output areas (LSOAs). These, alongside LA boundaries and zone classifications, were accessed from the Ordnance Survey ", 
-      tags$a(href="https://geoportal.statistics.gov.uk/datasets/lower-layer-super-output-area-december-2011-ew-bsc-v2", "Open Geography Portal.", target="_blank")
-      ),
-      
-      h4("Dashboard creation"),
-      "This app was created by ",
-      tags$a(href="https://twitter.com/chrisb_key/", "Chris C Brown", target="_blank"),
-      "using ",
-      tags$a(href="https://www.shinyapps.io/", "Shiny", target="_blank"),
-      "in R. Any development requests or feedback warmly recieved. You can find the source code on ",
-      tags$a(href="https://github.com/ccb2n19/", "GitHub.", target="_blank"),
-      width = 3
-    ),
+    
     mainPanel(
       tabsetPanel(
-        tabPanel("Headline trends",
+      
+            tabPanel("Headline trends",
                    valueBoxOutput("cpc_growth_box"),
                    valueBoxOutput("cagr_box"),
                    valueBoxOutput("change_in_cars_box"),
@@ -122,7 +106,7 @@ ui <- fluidPage(
                    column(6,
                           h4("Index of absolute number of registered cars"),
                           plotlyOutput("number_of_cars_index_plot")))),
-        tabPanel("National comparison",
+            tabPanel("National comparison",
                    tmapOutput("local_authority_plot",
                               height = 550),
                  br(),
@@ -133,7 +117,7 @@ ui <- fluidPage(
                         h4("Biggest growers"),
                         tableOutput("biggest_growers"))
                  ),
-        tabPanel("Small area comparisons",
+            tabPanel("Small area comparisons",
                  tmapOutput("lsoa_map",
                             height = 550),
                  br(),
@@ -161,7 +145,7 @@ ui <- fluidPage(
                  column(6, 
                         h4("Biggest growers"),
                         tableOutput("small_area_biggest_growers"))),
-        tabPanel("Socio-demographic breakdown",
+            tabPanel("Socio-demographic breakdown",
                  br(),
                  helpText("This chart presents the overall change in",
                           "cars per capita (CPC) in each zone of your chosen local authority, ",
@@ -177,13 +161,117 @@ ui <- fluidPage(
                               height = 1000)),
                  br(),
                  br()
-                 )
-    )
-    , width = 9)))
+                 ),
+            tabPanel("About the data",
+                     shinydashboard::box(width = 9,
+                                         br(),
+                                         p("Car registrations data is from the Driver and Vehicle Licensing Agency (DVLA). 
+                                           It was obtained via a freedom of information (FOI) request by ", 
+                                           a(href = "https://twitter.com/Urban_Turbo", "Scott Urban.", target="_blank"), 
+                                           "The dataset details the annual population and number of car registrations in each ", 
+                                           tags$a(href="https://ocsi.uk/2019/03/18/lsoas-leps-and-lookups-a-beginners-guide-to-statistical-geographies/",
+                                           "lower layer super output area", target="_blank"),
+                                           "(LSOA) in England. The FOI data was supplemented with further information on low-traffic neighbourhoods (LTNs), 
+                                           land use, and socio-demographic characteristics of each zone.",
+                                           style="padding-bottom: 10px;"),
+                                         
+                                         h4("What the data says ..."),
+                                         p("It provides a detailed geographic breakdown of the number of ",
+                                           tags$a(href="https://www.gov.uk/vehicle-registration", "registered", target="_blank"),
+                                           "cars, how this has changed since 2010, and a comparison between the number of registered cars and the 
+                                           number of people in each area. This provides an aggregate perspective on whether local populations have decided 
+                                           to take on car ownership, purchase additional cars, or give up car ownership. 
+                                           The high spatial resolution may help detect the impact of local interventions, like LTNs 
+                                           or public transport infrastructure.",
+                                           style="padding-bottom: 10px;"),
+                                         
+                                           h4("What it doesn’t say …"),
+                                           p("• Whether the cars are kept where they are registered. The cars of students, 
+                                             for example, may not be registered at their term address.",
+                                             br(),
+                                             "• Much about local car use and travel behaviour (e.g. trip distance or purpose). 
+                                                   The Department for Transport provides an ",
+                                             tags$a(href="https://roadtraffic.dft.gov.uk/local-authorities", 
+                                                    "annual estimate of motor vehicle traffic,", target="_blank"),
+                                             "but this is only available at local authority level.",
+                                         br(),
+                                           "• Whether the cars are for personal use. An analysis has been conducted to provide the option to 
+                                           exclude zones with high-non-residential land use and car dealerships, 
+                                                   which can otherwise skew the local picture.",
+                                           style="padding-bottom: 10px;")
+                     )
+            ),
+            tabPanel("About the dashboard & author",
+                     shinydashboard::box(width = 9,
+                                         br(),
+                                         p("This app provides a breakdown of car registrations in England."),
+                                         p("It’s designed to support:"),
+                                         p("• Decision-making by transport authorities and campaigners by providing 
+                                           a local insight into car dependence trends",
+                                         br(), "• Research into the drivers of car ownership by people like transport 
+                                           planners and urban geographers", style="padding-bottom: 10px;"), 
+                                         h4("Dashboard creation"),
+                                         p("The dashboard was created using Shiny in R. Data processing was conducted using 
+                                           the tidyverse group of R packages. Spatial analysis was conducted using the ",
+                                           a(href = "https://r-spatial.github.io/sf/", "sf()", target="_blank"), "and ", 
+                                           a(href ="https://cran.r-project.org/web/packages/osmdata/vignettes/osmdata.html", "osmdata()", target="_blank"), 
+                                           "R packages. Maps were created using ",
+                                           a(href = "https://cran.r-project.org/web/packages/tmap/vignettes/tmap-getstarted.html",  "tmap()", target="_blank"), 
+                                           "alongside basemaps from ",
+                                           a(href = "https://stadiamaps.com/", "Stadia Maps,", target="_blank"),
+                                           a(href = "https://openmaptiles.org/","OpenMapTiles", target="_blank"), "and",
+                                           a(href = "https://www.openstreetmap.org/#map=15/56.1146/-3.9063","OpenStreetMap", target="_blank"), "contributors.",
+                                           "Local authority (2019) and LSOA boundaries (2011) are from the Ordnance Survey ",
+                                           a(href = "https://geoportal.statistics.gov.uk/datasets/lower-layer-super-output-area-december-2011-ew-bsc-v2", "Open Geography Portal.", target="_blank"),
+                                           "Source code is available on ",
+                                           a(href = "https://github.com/ccb2n19", "GitHub.", target="_blank")
+                                           ,
+                                           style="padding-bottom: 10px;"),
+                                         h4("About the author"),
+                                         p("This app was created by Christoper C Brown, a recent graduate in transport planning from the University of Southampton. 
+                                          I'm now applying for roles in local government, academia, and consultancy in the UK and Switzerland. 
+                                           If you know of projects or positions in which I could use geospatial analysis, mapping, marketing and transport appraisal to 
+                                           help tackle car dependence - I'd love to hear from you. Get in touch via ",
+                                           a(href = "mailto:brown.chrisc1@gmail.com", "email,", target="_blank"),
+                                           a(href = "https://www.linkedin.com/in/christopher-c-brown-62280842/", "LinkedIn", target="_blank"), "or",
+                                           a(href = "https://twitter.com/ChrisB_Key", "Twitter.", target="_blank")
+                                           )
+              
+            )
+            )
+            
+    ), width = 9)))
            
 
 ### SERVER ###
 server <- function(input, output) {
+  
+  # Welcome popup
+  
+  query_modal <- modalDialog(
+    
+    # Text
+    
+    p("This app provides a geographic breakdown of car registrations in England,
+      based on data from the Driver and Vehicle Licensing Agency (DVLA)."),
+    p(
+      "← Select a local authority and year range on the left"),
+    p(
+       "↑ See different views of the data using the tabs at the top"),
+    p(
+      "This is a personal project. Care has been taken during data processing and development, 
+      but it hasn't been peer reviewed or rigorously quality assured. Any issues or 
+      proposals for developments would be gladly recieved by the author via",
+      a(href = "https://www.linkedin.com/in/christopher-c-brown-62280842/", "LinkedIn", target="_blank"), "or",
+      a(href = "https://twitter.com/ChrisB_Key", "Twitter.", target="_blank")),
+    
+    title = "Data dashboard of car registrations in England",
+    easyClose = TRUE,
+    footer = modalButton("Let's go")
+    )
+  
+  showModal(query_modal)
+  
   # Set inputs as reactive values
   
   ## Years
@@ -450,7 +538,7 @@ server <- function(input, output) {
                            filter(LAD19NM == la()) %>% 
                            pull(change_in_cars) < 0,
                          "fewer cars registered in the LA",
-                         "more cars registered in in the LA")
+                         "more cars registered in the LA")
     )
   })
   
@@ -459,7 +547,7 @@ server <- function(input, output) {
   output$national_and_local_time_series_plot <- renderPlotly({
     ggplotly(
       ggplot(data = national_and_local_time_series(), aes(x = year, y = cpc)) +
-        geom_line(aes(linetype = type)) +
+        geom_line(aes(linetype = type, colour = type), lwd = 1.3) +
         scale_y_continuous(limits = c(0, NA),
                            labels = scales::number_format(accuracy = 0.1),
                            name = "Cars per capita") +
@@ -473,7 +561,7 @@ server <- function(input, output) {
   output$number_of_cars_index_plot <- renderPlotly({
     ggplotly(
       ggplot(data = national_and_local_cars_index(), aes(x = year, y = index)) +
-        geom_line(aes(linetype = type)) +
+        geom_line(aes(linetype = type, colour = type), lwd = 1.3) +
         scale_y_continuous(labels = scales::number_format(accuracy = 0.1),
                            name = paste0("Index (", start_year(), "= 100)")) +
         scale_x_continuous(labels = scales::number_format(accuracy = 1,
@@ -491,7 +579,6 @@ server <- function(input, output) {
     selected_la <- growth_by_la() %>%
       filter(LAD19NM == la())
     
-    tm_basemap(server = "https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}{r}.png") +
     tm_shape(growth_by_la(), 
              bbox = selected_la,
              name = "All LAs") +
@@ -504,6 +591,7 @@ server <- function(input, output) {
                   n = 10,
                   title = "Total growth in cars per capita",
                   popup.vars = c("LA name" = "LAD19NM",
+                                 "Car reduction rank" = "cpc_growth_rank",
                                  "Change in CPC over period (%)" = "total_growth_in_cpc",
                                  "Average annual change in CPC (%)" = "cagr",
                                  "Number of cars (start)" = "cars_start_of_period",
@@ -559,7 +647,6 @@ server <- function(input, output) {
       filter(LAD19NM == la()) %>%
       summarise(LAD19NM = la())
 
-      tm_basemap(server = "https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}{r}.png") +
                   tm_shape(lsoas_for_plot(),
                            bbox = la_outline, 
                            name = "LSOAs") +
